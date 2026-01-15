@@ -23,18 +23,37 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import subprocess
 import os
 import sfm
 import sfmApp
 import json
 import traceback
 import _winreg as winreg
+from vs import datamodel
 from PySide import QtGui, QtCore, shiboken
 
 _session_presets_version = "0.1"
 
 def _session_presets_msg(msg):
     sfm.Msg("[SESSION PRESETS] " + msg + "\n")
+
+def _session_presets_msg_box(msg, prefix, icon):
+    _session_presets_msg(prefix + ": " + msg)
+    msgBox = QtGui.QMessageBox()
+    msgBox.setWindowTitle("Session Presets: " + prefix)
+    msgBox.setText(msg)
+    msgBox.setIcon(icon)
+    msgBox.exec_()
+
+def _session_presets_info_msg(msg):
+    _session_presets_msg_box(msg, "Info", QtGui.QMessageBox.Information)
+
+def _session_presets_error_msg(msg):
+    _session_presets_msg_box(msg, "Error", QtGui.QMessageBox.Critical)
+
+def _session_presets_warning_msg(msg):
+    _session_presets_msg_box(msg, "Warning", QtGui.QMessageBox.Warning)
 
 class PyCQEditorLowerBarWidget(QtGui.QWidget):
     # python implementation of CQEditorLowerBarWidget
@@ -109,6 +128,7 @@ class SessionPresets:
         self.autoload_preset_is_default = True
         self.custom_framerate_checkbox_state = False
         self.changing_preset = False
+        self.version_changed = False
         self.default_presets = [
             {
                 "name": "Blank",
@@ -123,13 +143,88 @@ class SessionPresets:
                 "description": "Uses the dark_room map with a camera set up in the corner.",
             }
         ]
+        self.custom_presets = []
+        self.windowFlags = QtCore.Qt.Dialog | QtCore.Qt.WindowCloseButtonHint | QtCore.Qt.WindowSystemMenuHint | QtCore.Qt.MSWindowsFixedSizeDialogHint
+        self.cwd = os.getcwd()
+        self.dmxConvert = self.cwd + r"\bin\dmxconvert.exe"
         self.presets = []
         self.added_separator_header = False
         self.registry_path = r"Software\Valve\SourceFilmmaker\NewSessionWizard"
+        self.extract_startup_sessions()
         self.load_options()
-        self.new_session_menu()
+        self.new_session_menu(True)
         #self.add_window_actions()
         #self.open_startup_session()
+    def load_dmx_file(self, path):
+        # run dmxconvert to load a dmx file
+        out = self.cwd + r"\_temp.dmx"
+        # Delete out if it currently exists
+        if os.path.isfile(out):
+            os.remove(out)
+        # Run dmxconvert using system call
+        args = ["-i", path, "-oe", "keyvalues2", "-o", out]
+        subprocess.Popen([self.dmxConvert] + args, shell=True).wait()
+        # Check if out was created
+        if os.path.isfile(out):
+            return out
+        return None
+    def get_session_from_dmx(self, dmx_path):
+        # Read the dmx file and extract the framerate from the dmElement "sessionSettings"
+        try:
+            with open(dmx_path, "r") as f:
+                lines = f.readlines()
+                # Search for "renderSettings" "DmElement" and read until we match a line containing "frameRate" "float" "
+                # If a match is found, read framerate until we see a " -> return the framerate value
+                # If we read a } before finding frameRate, return None
+                in_render_settings = False
+                in_active_clip = False
+                clip_id = None
+                framerate_value = None
+                clip_name = None
+                for line in lines:
+                    line = line.strip()
+                    if not framerate_value and '"renderSettings" "DmElement"' in line:
+                        in_render_settings = True
+                    elif not framerate_value and in_render_settings:
+                        if '}' in line:
+                            # End of renderSettings
+                            in_render_settings = False
+                        elif '"frameRate" "float" "' in line:
+                            # Extract framerate value
+                            parts = line.split('"')
+                            for i in range(len(parts)):
+                                if parts[i] == "float" and i + 2 < len(parts):
+                                    framerate_value = parts[i + 2].strip()
+                                    in_render_settings = False
+                    # "activeClip" "element" "91b71055-26fe-4b6f-bf6a-6afdc2a986ee"
+                    elif not clip_name and not clip_id and '"activeClip" "element" "' in line:
+                        # Get the clip ID
+                        parts = line.split('"')
+                        for i in range(len(parts)):
+                            if parts[i] == "element" and i + 2 < len(parts):
+                                clip_id = parts[i + 2].strip()
+                    elif not clip_name and clip_id and '"id" "elementid" "' + clip_id + '"' in line:
+                        in_active_clip = True
+                    elif not clip_name and in_active_clip:
+                        if '}' in line:
+                            # End of activeClip
+                            in_active_clip = False
+                            clip_id = None
+                        elif '"name" "string" "' in line:
+                            # Extract clip name
+                            parts = line.split('"')
+                            for i in range(len(parts)):
+                                if parts[i] == "string" and i + 2 < len(parts):
+                                    clip_name = parts[i + 2].strip()
+                                    in_active_clip = False
+                    if framerate_value and clip_name:
+                        return {
+                            "name": clip_name,
+                            "fps": framerate_value,
+                        }
+        except Exception as e:
+            _session_presets_msg("Error reading dmx file %s: %s" % (dmx_path, e))
+        return None
     def load_options(self):
         # JSON file format
         """
@@ -176,6 +271,8 @@ class SessionPresets:
                 _session_presets_msg("Loaded options from %s" % options_path)
             except Exception as e:
                 _session_presets_msg("Error loading options from %s: %s" % (options_path, e))
+    def extract_startup_sessions(self):
+        pass
     def save_options(self):
         options_path = os.path.join(self.cwd, self.options_file)
         data = {
@@ -210,22 +307,23 @@ class SessionPresets:
         new_action.triggered.connect(self.new_session_menu)
         file_menu.insertAction(file_menu.actions()[0], new_action)
         file_menu.insertSeparator(file_menu.actions()[-2])
-        self.defaults_menu = menu_bar.addMenu("Defaults")
-
-            
+        self.defaults_menu = menu_bar.addMenu("Defaults") 
     def open_session(self):
         # todo!
         pass
-    def new_session_menu(self):
+    def new_session_menu(self, startupWizard=False):
         self.custom_framerate_checkbox_state = False
         self.changing_preset = False
         # Create modal dialog
         dialog = QtGui.QDialog()
         dialog.setModal(True)
-        dialog.setFixedSize(800, 260)
+        if startupWizard:
+            dialog.setFixedSize(800, 430)
+        else:
+            dialog.setFixedSize(800, 260)
         dialog.setWindowTitle(" ")
         dialog.setObjectName("NewSessionWizard")
-        dialog.setWindowFlags(QtCore.Qt.Dialog | QtCore.Qt.WindowCloseButtonHint | QtCore.Qt.WindowSystemMenuHint | QtCore.Qt.MSWindowsFixedSizeDialogHint)
+        dialog.setWindowFlags(self.windowFlags)
         
         # Main layout
         main_layout = QtGui.QVBoxLayout(dialog)
@@ -263,47 +361,52 @@ class SessionPresets:
         
         # Preset combo box (populated with default presets, a separator if there are custom presets, and then custom presets)
         preset_combo = QtGui.QComboBox(group_box)
-        preset_combo.setGeometry(360+3, 20, 220, 23)
+        preset_combo.setGeometry(363, 20, 227, 23)
 
-        autoload_append = " (autoload)"
-        item_index = 0
-        preset_combo.insertItem(item_index, "Default Presets")
-        preset_combo.model().item(item_index).setEnabled(False)
-        item_index += 1
-        # Add default presets
-        for preset in self.default_presets:
-            preset_name = preset.get("name", "")
-            if self.autoload_preset_is_default and preset_name == self.autoload_preset:
-                preset_name += autoload_append
-            preset_combo.insertItem(item_index, preset_name)
-            preset_combo.setCurrentIndex(item_index)
+        self.custom_presets = []
+        def rebuild_preset_combo(combo, append):
+            combo.clear()
+            self.custom_presets = []
+            item_index = 0
+            combo.insertItem(item_index, "Default Presets")
+            combo.model().item(item_index).setEnabled(False)
             item_index += 1
-        preset_combo.setCurrentIndex(1)
-        # Add separator if there are custom presets
-        custom_presets = []
-        for preset in self.presets:
-            name = preset.get("name", "")
-            if name:
-                custom_presets.append(name)
-        if custom_presets:
-            preset_combo.insertSeparator(item_index)
-            item_index += 1
-            preset_combo.insertItem(item_index, "Custom Presets")
-            preset_combo.model().item(item_index).setEnabled(False)
-            item_index += 1
-            for preset in custom_presets:
-                preset_name = preset
-                if not self.autoload_preset_is_default and preset_name == self.autoload_preset:
-                    preset_name = preset_name + autoload_append
-                preset_combo.insertItem(item_index, preset_name)
-                preset_combo.setCurrentIndex(item_index)
+            # Add default presets
+            for preset in self.default_presets:
+                preset_name = preset.get("name", "")
+                if self.autoload_preset_is_default and preset_name == self.autoload_preset:
+                    preset_name += append
+                combo.insertItem(item_index, preset_name)
+                combo.setCurrentIndex(item_index)
                 item_index += 1
+            combo.setCurrentIndex(1)
+            # Add separator if there are custom presets
+            for preset in self.presets:
+                name = preset.get("name", "")
+                if name:
+                    self.custom_presets.append(name)
+            if self.custom_presets:
+                combo.insertSeparator(item_index)
+                item_index += 1
+                combo.insertItem(item_index, "Custom Presets")
+                combo.model().item(item_index).setEnabled(False)
+                item_index += 1
+                for preset in self.custom_presets:
+                    preset_name = preset
+                    if not self.autoload_preset_is_default and preset_name == self.autoload_preset:
+                        preset_name = preset_name + append
+                    combo.insertItem(item_index, preset_name)
+                    combo.setCurrentIndex(item_index)
+                    item_index += 1
+        rebuild_preset_combo(preset_combo, " (autoload)")
 
         default_framerate_index = 7
         
         # Bottom button bar (PyCQEditorLowerBarWidget)
         lower_bar = PyCQEditorLowerBarWidget()
         lower_bar.setStatusText(self.descriptor)
+        if startupWizard:
+            lower_bar.setVisible(False)
 
         def preset_changed(index):
             self.changing_preset = True
@@ -321,7 +424,9 @@ class SessionPresets:
             # Check if it's a default preset (index < len(default_presets))
             if index < len(self.default_presets):
                 description = self.default_presets[index].get("description", "")
-            elif custom_presets:
+                print("1")
+            elif self.custom_presets:
+                print("2")
                 # It's a custom preset - calculate the actual custom preset index
                 default_count = len(self.default_presets)
                 custom_index = index - default_count - 2 # -2 for header and separator
@@ -335,8 +440,9 @@ class SessionPresets:
                             framerate_value = float(framerate_value)
                         except:
                             framerate_value = 24.0
-                        # Check if framerate_value is in combo
-                        combo_index = framerate_combo.findText(str(framerate_value))
+                        # Check if framerate_value is in combo, remove leading zeros
+                        rounded_str = str(round(framerate_value, 3)).rstrip('0').rstrip('.')
+                        combo_index = framerate_combo.findText(rounded_str)
                         if combo_index != -1:
                             custom_framerate_checkbox.setChecked(False)
                             framerate_combo.setCurrentIndex(combo_index)
@@ -362,10 +468,15 @@ class SessionPresets:
         dir_label = QtGui.QLabel("Directory:", group_box)
         dir_label.move(10, 53)
         dir_edit = QtGui.QLineEdit(group_box)
-        dir_edit.setGeometry(70, 48, 620, 23)
+        if not startupWizard:
+            dir_edit.setGeometry(70, 48, 620, 23)
+        else:
+            dir_edit.setGeometry(70, 48, 520, 23)
         dir_edit.setText("c:\\program files (x86)\\steam\\steamapps\\common\\sourcefilmmaker\\game\\usermod\\elements\\sessions")
         browse_button = QtGui.QPushButton("Browse...", group_box)
         browse_button.setGeometry(702, 48, 80, 23)
+        if startupWizard:
+            browse_button.setGeometry(596, 48, 80, 23)
         
         # Framerate dropdown field
         framerate_label = QtGui.QLabel("Framerate:", group_box)
@@ -431,9 +542,16 @@ class SessionPresets:
         cancel_button = QtGui.QPushButton("Cancel")
         create_button = QtGui.QPushButton("Create")
         create_button.setDefault(True)
+        create_button.setAutoDefault(True)
         
-        lower_bar.addButton(create_button)
-        lower_bar.addButton(cancel_button)
+        if not startupWizard:
+            lower_bar.addButton(create_button)
+            lower_bar.addButton(cancel_button)
+        else:
+            cancel_button.setVisible(False)
+            # reset create_button so we can create it as a child of group box
+            create_button = QtGui.QPushButton("Create", group_box)
+            create_button.setGeometry(682, 48, 100, 23)
         
         main_layout.addWidget(content_widget)
         main_layout.addWidget(lower_bar)
@@ -468,6 +586,237 @@ class SessionPresets:
                 dir_edit.setText(directory)
         
         browse_button.clicked.connect(browse_directory)
+
+        def open_preset_editor():
+            # save current state so we can restore it if the user cancels
+            saved_presets = [preset.copy() for preset in self.presets]
+            saved_autoload_preset = self.autoload_preset
+            saved_autoload_preset_is_default = self.autoload_preset_is_default
+            preset_editor = QtGui.QDialog(dialog)
+            preset_editor.setModal(True)
+            preset_editor.setObjectName("SessionPresetEditor")
+            preset_editor.setWindowFlags(self.windowFlags)
+            preset_editor.setWindowTitle("Edit Session Presets")
+            preset_editor.setFixedSize(600, 350)
+            preset_editor_layout = QtGui.QVBoxLayout(preset_editor)
+            preset_editor_layout.setContentsMargins(0, 0, 0, 0)
+            preset_editor_layout.setSpacing(0)
+            preset_editor.setLayout(preset_editor_layout)
+            preset_editor_content = QtGui.QWidget()
+            preset_editor_content_layout = QtGui.QVBoxLayout(preset_editor_content)
+            preset_editor_content_layout.setContentsMargins(6, 6, 6, 6)
+            preset_editor_content_layout.addStretch()
+            preset_editor_layout.addWidget(preset_editor_content)
+            # Select autoload preset dropdown
+            autoload_group = QtGui.QGroupBox(" Options ")
+            autoload_group.setFixedHeight(70)
+            preset_editor_content_layout.addWidget(autoload_group)
+            autoload_layout = QtGui.QHBoxLayout(autoload_group)
+            autoload_label = QtGui.QLabel("Autoload Preset:")
+            autoload_combo = QtGui.QComboBox()
+            autoload_layout.addWidget(autoload_label)
+            autoload_layout.addWidget(autoload_combo)
+            # Populate autoload combo
+            rebuild_preset_combo(autoload_combo, append="")
+            def autoload_changed(index):
+                index = index - 1 # Adjust for header item
+                self.custom_presets = []
+                for preset in self.presets:
+                    name = preset.get("name", "")
+                    if name:
+                        self.custom_presets.append(name)
+                if index < len(self.default_presets):
+                    # Default preset selected
+                    preset = self.default_presets[index]
+                    self.autoload_preset = preset.get("name", "")
+                    self.autoload_preset_is_default = True
+                elif self.custom_presets:
+                    # It's a custom preset - calculate the actual custom preset index
+                    default_count = len(self.default_presets)
+                    custom_index = index - default_count - 2 # -2 for header and separator
+                    if 0 <= custom_index < len(self.presets):
+                        preset = self.presets[custom_index]
+                        self.autoload_preset = preset.get("name", "")
+                        self.autoload_preset_is_default = False
+            autoload_combo.currentIndexChanged.connect(autoload_changed)
+            def find_autoload_index():
+                # Find the index of the current autoload preset in the combo
+                for i in range(autoload_combo.count()):
+                    item_text = autoload_combo.itemText(i)
+                    if self.autoload_preset_is_default:
+                        if item_text == self.autoload_preset:
+                            return i
+                    else:
+                        if item_text == self.autoload_preset:
+                            return i
+                self.autoload_preset = self.default_presets[0].get("name", "")
+                self.autoload_preset_is_default = True
+                return 1
+            autoload_combo.setCurrentIndex(find_autoload_index())
+            # Custom preset table
+            preset_table = QtGui.QTableWidget()
+            preset_table.setColumnCount(5)
+            preset_table.setHorizontalHeaderLabels(["Order", "Name", "FPS", "Path", "Description"])
+            preset_table.setColumnHidden(0, True)
+            # set framerate column to small and read-only
+            preset_table.setColumnWidth(2, 48)
+            preset_table.setColumnWidth(3, 128)
+            preset_table.horizontalHeader().setStretchLastSection(True)
+            preset_table.sortItems(0, QtCore.Qt.AscendingOrder)
+            preset_table.setEditTriggers(QtGui.QAbstractItemView.DoubleClicked | QtGui.QAbstractItemView.SelectedClicked)
+            # Populate table with current presets
+            preset_table.setRowCount(len(self.presets))
+            for row, preset in enumerate(self.presets):
+                order_item = QtGui.QTableWidgetItem(str(preset.get("order", row)))
+                name_item = QtGui.QTableWidgetItem(preset.get("name", ""))
+                description_item = QtGui.QTableWidgetItem(preset.get("description", ""))
+                framerate_item = QtGui.QTableWidgetItem(preset.get("framerate", ""))
+                path_item = QtGui.QTableWidgetItem(preset.get("path", ""))
+                preset_table.setItem(row, 0, order_item)
+                preset_table.setItem(row, 1, name_item)
+                preset_table.setItem(row, 2, framerate_item)
+                preset_table.setItem(row, 3, path_item)
+                preset_table.setItem(row, 4, description_item)
+            preset_editor_content_layout.addWidget(preset_table)
+            # Add, Move Up, Move Down, Delete buttons
+            preset_button_bar = QtGui.QWidget()
+            preset_button_bar_layout = QtGui.QHBoxLayout(preset_button_bar)
+            preset_button_bar_layout.addStretch()
+            preset_button_bar_layout.setContentsMargins(0, 0, 0, 0)
+            add_button = QtGui.QPushButton("Add")
+            move_up_button = QtGui.QPushButton("Move Up")
+            move_down_button = QtGui.QPushButton("Move Down")
+            delete_button = QtGui.QPushButton("Delete")
+            preset_button_bar_layout.addWidget(add_button)
+            preset_button_bar_layout.addWidget(move_up_button)
+            preset_button_bar_layout.addWidget(move_down_button)
+            preset_button_bar_layout.addWidget(delete_button)
+            preset_editor_content_layout.addWidget(preset_button_bar)
+            def add_preset():
+                # File picker dialog to select a .dmx file
+                file_dialog = QtGui.QFileDialog(preset_editor, "Select Preset DMX File", "", "SFM Session (*.dmx)")
+                file_dialog.setFileMode(QtGui.QFileDialog.ExistingFile)
+                # Default to the directory in dir_edit
+                start_dir = dir_edit.text().strip()
+                if os.path.isdir(start_dir):
+                    file_dialog.setDirectory(start_dir)
+                else:
+                    file_dialog.setDirectory(self.cwd + r"\usermod\elements\sessions")
+                if file_dialog.exec_():
+                    selected_files = file_dialog.selectedFiles()
+                    if selected_files:
+                        file_path = selected_files[0]
+                        # Make sure we can access the file
+                        if not os.path.isfile(file_path):
+                            _session_presets_error_msg("The selected file does not exist:\n%s" % file_path)
+                            return
+                        # Try to get framerate from dmx file
+                        framerate_value = ""
+                        session_name = ""
+                        defaultFps = "24"
+                        dmx_converted_path = self.load_dmx_file(file_path)
+                        if dmx_converted_path:
+                            session_data = self.get_session_from_dmx(dmx_converted_path)
+                            if session_data:
+                                framerate_value = session_data["fps"]
+                                session_name = session_data["name"]
+                            # Delete temporary converted file
+                            os.remove(dmx_converted_path)
+                        if framerate_value == "":
+                            framerate_value = defaultFps
+                        if session_name == "":
+                            # Convert file name to session name by removing extension, replacing underscores or dashes with spaces, and capitalizing words
+                            base_name = os.path.basename(file_path)
+                            name_without_ext = os.path.splitext(base_name)[0]
+                            session_name = name_without_ext.replace("_", " ").replace("-", " ").title()
+                        # Add new row to table
+                        row = preset_table.rowCount()
+                        preset_table.insertRow(row)
+                        order_item = QtGui.QTableWidgetItem(str(row))
+                        name_item = QtGui.QTableWidgetItem(session_name)
+                        description_item = QtGui.QTableWidgetItem("")
+                        framerate_item = QtGui.QTableWidgetItem(framerate_value)
+                        path_item = QtGui.QTableWidgetItem(file_path)
+                        preset_table.setItem(row, 0, order_item)
+                        preset_table.setItem(row, 1, name_item)
+                        preset_table.setItem(row, 2, framerate_item)
+                        preset_table.setItem(row, 3, path_item)
+                        preset_table.setItem(row, 4, description_item)
+                        rebuild_preset_combo(preset_combo, append="")
+                        find_autoload_index()
+            def move_up_preset():
+                current_row = preset_table.currentRow()
+                if current_row > 0:
+                    preset_table.insertRow(current_row - 1)
+                    for col in range(preset_table.columnCount()):
+                        item = preset_table.takeItem(current_row + 1, col)
+                        preset_table.setItem(current_row - 1, col, item)
+                    preset_table.removeRow(current_row + 1)
+                    preset_table.setCurrentCell(current_row - 1, 0)
+                    rebuild_preset_combo(preset_combo, append="")
+                    find_autoload_index()
+            def move_down_preset():
+                current_row = preset_table.currentRow()
+                if current_row < preset_table.rowCount() - 1 and current_row != -1:
+                    preset_table.insertRow(current_row + 2)
+                    for col in range(preset_table.columnCount()):
+                        item = preset_table.takeItem(current_row, col)
+                        preset_table.setItem(current_row + 2, col, item)
+                    preset_table.removeRow(current_row)
+                    preset_table.setCurrentCell(current_row + 1, 0)
+                    rebuild_preset_combo(preset_combo, append="")
+                    find_autoload_index()
+            def delete_preset():
+                current_row = preset_table.currentRow()
+                if current_row != -1:
+                    preset_table.removeRow(current_row)
+                    rebuild_preset_combo(preset_combo, append="")
+                    find_autoload_index()
+            add_button.clicked.connect(add_preset)
+            move_up_button.clicked.connect(move_up_preset)
+            move_down_button.clicked.connect(move_down_preset)
+            delete_button.clicked.connect(delete_preset)
+            # Lower bar with OK and Cancel buttons
+            preset_lower_bar = PyCQEditorLowerBarWidget()
+            preset_lower_bar.setStatusText("Session Presets v%s by KiwifruitDev" % _session_presets_version)
+            preset_create_button = QtGui.QPushButton("OK")
+            preset_create_button.setDefault(True)
+            preset_create_button.setAutoDefault(True)
+            preset_create_button.clicked.connect(preset_editor.accept)
+            preset_cancel_button = QtGui.QPushButton("Cancel")
+            preset_cancel_button.clicked.connect(preset_editor.reject)
+            preset_lower_bar.addButton(preset_create_button)
+            preset_lower_bar.addButton(preset_cancel_button)
+            preset_editor_layout.addWidget(preset_lower_bar)
+            result = preset_editor.exec_()
+            if result == QtGui.QDialog.Accepted:
+                # Reload presets after editing
+                self.presets = []
+                for row in range(preset_table.rowCount()):
+                    order_item = preset_table.item(row, 0)
+                    name_item = preset_table.item(row, 1)
+                    framerate_item = preset_table.item(row, 2)
+                    path_item = preset_table.item(row, 3)
+                    description_item = preset_table.item(row, 4)
+                    preset = {
+                        "order": int(order_item.text()) if order_item else row,
+                        "name": name_item.text() if name_item else "",
+                        "description": description_item.text() if description_item else "",
+                        "framerate": framerate_item.text() if framerate_item else "",
+                        "path": path_item.text() if path_item else ""
+                    }
+                    self.presets.append(preset)
+                self.save_options()
+                rebuild_preset_combo(preset_combo, append=" (autoload)")
+                preset_changed(preset_combo.currentIndex())
+                check_create_enabled()
+            else:
+                # Restore saved presets
+                self.presets = saved_presets
+                self.autoload_preset = saved_autoload_preset
+                self.autoload_preset_is_default = saved_autoload_preset_is_default
+
+        preset_edit_button.clicked.connect(open_preset_editor)
         
         # Button connections
         create_button.clicked.connect(dialog.accept)
@@ -591,14 +940,11 @@ def _SessionPresets_FirstBoot():
         globals()["_session_presets"] = sessionpresets
     except Exception  as e:
         traceback.print_exc()
-        msgBox = QtGui.QMessageBox()
-        msgBox.setWindowTitle("Session Presets")
-        msgBox.setText("Error: %s" % e)
-        msgBox.exec_()
+        _session_presets_error_msg("Error: %s" % e)
 
 # Attached default startup session in binary, saved to usermod\elements\default_startup_sessions.dmx on first run
 startup_session = """
-A
+###
 """
 
 _SessionPresets_FirstBoot()
