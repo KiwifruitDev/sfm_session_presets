@@ -30,7 +30,7 @@ import sfmApp
 import json
 import traceback
 import _winreg as winreg
-from vs import datamodel
+from vs import g_pDataModel as dm
 from PySide import QtGui, QtCore, shiboken
 
 _session_presets_version = "0.1"
@@ -150,7 +150,6 @@ class SessionPresets:
         self.presets = []
         self.added_separator_header = False
         self.registry_path = r"Software\Valve\SourceFilmmaker\NewSessionWizard"
-        self.extract_startup_sessions()
         self.load_options()
         self.new_session_menu(True)
         #self.add_window_actions()
@@ -176,28 +175,12 @@ class SessionPresets:
                 # Search for "renderSettings" "DmElement" and read until we match a line containing "frameRate" "float" "
                 # If a match is found, read framerate until we see a " -> return the framerate value
                 # If we read a } before finding frameRate, return None
-                in_render_settings = False
                 in_active_clip = False
                 clip_id = None
-                framerate_value = None
                 clip_name = None
                 for line in lines:
                     line = line.strip()
-                    if not framerate_value and '"renderSettings" "DmElement"' in line:
-                        in_render_settings = True
-                    elif not framerate_value and in_render_settings:
-                        if '}' in line:
-                            # End of renderSettings
-                            in_render_settings = False
-                        elif '"frameRate" "float" "' in line:
-                            # Extract framerate value
-                            parts = line.split('"')
-                            for i in range(len(parts)):
-                                if parts[i] == "float" and i + 2 < len(parts):
-                                    framerate_value = parts[i + 2].strip()
-                                    in_render_settings = False
-                    # "activeClip" "element" "91b71055-26fe-4b6f-bf6a-6afdc2a986ee"
-                    elif not clip_name and not clip_id and '"activeClip" "element" "' in line:
+                    if not clip_name and not clip_id and '"activeClip" "element" "' in line:
                         # Get the clip ID
                         parts = line.split('"')
                         for i in range(len(parts)):
@@ -217,10 +200,9 @@ class SessionPresets:
                                 if parts[i] == "string" and i + 2 < len(parts):
                                     clip_name = parts[i + 2].strip()
                                     in_active_clip = False
-                    if framerate_value and clip_name:
+                    if clip_name:
                         return {
-                            "name": clip_name,
-                            "fps": framerate_value,
+                            "name": clip_name
                         }
         except Exception as e:
             _session_presets_msg("Error reading dmx file %s: %s" % (dmx_path, e))
@@ -235,12 +217,17 @@ class SessionPresets:
                 "autoload_preset_is_default": true,
                 "version": "0.0"
             },
+            "default_presets": [
+                {
+                    "name": "Blank",
+                    "description": "An empty session without a map or camera.\nThis is what SFM uses by default."
+                },
+            ],
             "presets": [
                 {
                     "name": "Custom Preset 1",
                     "order": 1,
                     "description": "A custom preset",
-                    "framerate": "30",
                     "path": "C:\\path\\to\\custom\\preset1.dmx"
                 }
             ]
@@ -258,21 +245,21 @@ class SessionPresets:
                 self.autoload_preset = options.get("autoload_preset", "")
                 self.autoload_enabled = options.get("autoload_enabled", False)
                 self.autoload_preset_is_default = options.get("autoload_preset_is_default", False)
+                default_presets = data.get("default_presets", [])
+                if default_presets:
+                    self.default_presets = default_presets
                 presets = data.get("presets", [])
                 for preset in presets:
                     append_preset = {
                         "name": preset.get("name", ""),
                         "order": preset.get("order", 0),
                         "description": preset.get("description", ""),
-                        "framerate": preset.get("framerate", ""),
                         "path": preset.get("path", "")
                     }
                     self.presets.append(append_preset)
                 _session_presets_msg("Loaded options from %s" % options_path)
             except Exception as e:
                 _session_presets_msg("Error loading options from %s: %s" % (options_path, e))
-    def extract_startup_sessions(self):
-        pass
     def save_options(self):
         options_path = os.path.join(self.cwd, self.options_file)
         data = {
@@ -282,6 +269,7 @@ class SessionPresets:
                 "autoload_preset_is_default": self.autoload_preset_is_default,
                 "version": _session_presets_version
             },
+            "default_presets": self.default_presets,
             "presets": self.presets
         }
         try:
@@ -308,9 +296,83 @@ class SessionPresets:
         file_menu.insertAction(file_menu.actions()[0], new_action)
         file_menu.insertSeparator(file_menu.actions()[-2])
         self.defaults_menu = menu_bar.addMenu("Defaults") 
-    def open_session(self):
-        # todo!
-        pass
+    def create_session(self, preset_index, framerate, filename, directory):
+        print("Creating session with preset index %d, framerate %f, filename %s, directory %s" % (preset_index, framerate, filename, directory))
+        default_preset = False
+        preset_path = ""
+        # Determine if preset_index is a default preset or custom preset
+        if preset_index > 0:
+            preset_index -= 1 # Adjust for header item
+            if preset_index < len(self.default_presets):
+                default_preset = True
+                preset_path = self.default_presets[preset_index].get("name", "")
+                print("Using default preset: %s" % preset_path)
+            else:
+                # It's a custom preset - calculate the actual custom preset index
+                default_count = len(self.default_presets)
+                custom_index = preset_index - default_count - 2 # -2 for header and separator
+                if 0 <= custom_index < len(self.presets):
+                    preset = self.presets[custom_index]
+                    preset_path = preset.get("path", "")
+        if default_preset:
+            dmx_path = os.path.join(self.cwd, "workshop\\scripts\\default_startup_sessions.dmx")
+            if os.path.isfile(dmx_path):
+                print("Loading default startup sessions from %s" % dmx_path)
+                sfmApp.OpenDocument(dmx_path)
+                sfmApp.ProcessEvents()
+                # Document loaded! First we'll update self.default_presets
+                document = sfmApp.GetDocumentRoot()
+                if document:
+                    dm.SetUndoEnabled(False)
+                    clipbin = getattr(document, "clipBin", None)
+                    if clipbin:
+                        clips = []
+                        clipbin_array = clipbin.GetValue()
+                        count = clipbin_array.Count()
+                        found_element = None
+                        print("Found %d clips in clipBin" % count)
+                        for i in range(count):
+                            print("Reading clip %d" % i)
+                            try:
+                                clip_element = clipbin_array[i]
+                                name = clip_element.name.GetValue()
+                                description = clip_element.text.GetValue()
+                                clips.append({
+                                    "name": name,
+                                    "description": description
+                                })
+                                if name == preset_path:
+                                    print("Found clip: %s" % name)
+                                    found_element = clip_element
+                            except Exception as e:
+                                _session_presets_msg("Error reading clip from clipBin: %s" % e)
+                        #clipbin.SetCount(0)
+                        #clipbin_array.AddToTail(document.activeClip)
+                        self.default_presets = clips
+                        if found_element:
+                            document.activeClip = found_element
+                            # convert filename to char const *
+                            filenameConverted = filename
+                            document.activeClip.SetName(filenameConverted)
+                            document.activeClip.text.SetValue("")
+                        document.name = filename
+                        document.settings.renderSettings.frameRate.SetValue(framerate)
+                        self.save_options()
+                        return
+                    else:
+                        _session_presets_error_msg("Failed to find clipBin in default startup sessions document.")
+                else:
+                    _session_presets_error_msg("Failed to open default startup sessions document.")
+            else:
+                _session_presets_error_msg("Default startup sessions file not found: %s" % dmx_path)
+        elif preset_path:
+            # Find preset in self.presets
+            if preset_path and os.path.isfile(preset_path):
+               sfmApp.OpenDocument(preset_path, forceSilent=False)
+               return
+            else:
+                _session_presets_error_msg("Preset file not found: %s" % preset_path)
+        sfmApp.NewDocument(filename=directory + "/" + filename + ".dmx", name=filename, framerate=framerate, defaultContent=True, forceSilent=False)
     def new_session_menu(self, startupWizard=False):
         self.custom_framerate_checkbox_state = False
         self.changing_preset = False
@@ -374,12 +436,10 @@ class SessionPresets:
             # Add default presets
             for preset in self.default_presets:
                 preset_name = preset.get("name", "")
+                item_index += 1
                 if self.autoload_preset_is_default and preset_name == self.autoload_preset:
                     preset_name += append
                 combo.insertItem(item_index, preset_name)
-                combo.setCurrentIndex(item_index)
-                item_index += 1
-            combo.setCurrentIndex(1)
             # Add separator if there are custom presets
             for preset in self.presets:
                 name = preset.get("name", "")
@@ -393,12 +453,24 @@ class SessionPresets:
                 item_index += 1
                 for preset in self.custom_presets:
                     preset_name = preset
+                    item_index += 1
                     if not self.autoload_preset_is_default and preset_name == self.autoload_preset:
                         preset_name = preset_name + append
                     combo.insertItem(item_index, preset_name)
-                    combo.setCurrentIndex(item_index)
-                    item_index += 1
-        rebuild_preset_combo(preset_combo, " (autoload)")
+            # Set current index to autoload preset
+            default_count = len(self.default_presets)
+            if self.autoload_preset_is_default:
+                for i in range(1, default_count + 1):
+                    text = combo.itemText(i)
+                    if text.replace(append, "") == self.autoload_preset:
+                        combo.setCurrentIndex(i)
+                        return
+            else:
+                for i in range(default_count + 2, combo.count()):
+                    text = combo.itemText(i)
+                    if text.replace(append, "") == self.autoload_preset:
+                        combo.setCurrentIndex(i)
+                        return
 
         default_framerate_index = 7
         
@@ -411,54 +483,24 @@ class SessionPresets:
         def preset_changed(index):
             self.changing_preset = True
             index = index - 1 # Adjust for header item
-
-            # Reset framerate controls to enabled state
-            framerate_combo.setCurrentIndex(default_framerate_index)
-            framerate_combo.setEnabled(True)
-            framerate_edit.setEnabled(True)
-            custom_framerate_label.setEnabled(True)
-            custom_framerate_checkbox.setEnabled(True)
-            custom_framerate_checkbox.setChecked(self.custom_framerate_checkbox_state)
             description = ""
             
             # Check if it's a default preset (index < len(default_presets))
             if index < len(self.default_presets):
                 description = self.default_presets[index].get("description", "")
-                print("1")
             elif self.custom_presets:
-                print("2")
                 # It's a custom preset - calculate the actual custom preset index
                 default_count = len(self.default_presets)
                 custom_index = index - default_count - 2 # -2 for header and separator
                 
                 if 0 <= custom_index < len(self.presets):
                     preset = self.presets[custom_index]
-                    framerate_value = preset.get("framerate", "")
-                    if framerate_value:
-                        # parse as float or use 24 as default
-                        try:
-                            framerate_value = float(framerate_value)
-                        except:
-                            framerate_value = 24.0
-                        # Check if framerate_value is in combo, remove leading zeros
-                        rounded_str = str(round(framerate_value, 3)).rstrip('0').rstrip('.')
-                        combo_index = framerate_combo.findText(rounded_str)
-                        if combo_index != -1:
-                            custom_framerate_checkbox.setChecked(False)
-                            framerate_combo.setCurrentIndex(combo_index)
-                        else:
-                            custom_framerate_checkbox.setChecked(True)
-                            framerate_edit.setValue(float(framerate_value))
-                        # Disable framerate controls for custom presets
-                        framerate_combo.setEnabled(False)
-                        framerate_edit.setEnabled(False)
-                        custom_framerate_label.setEnabled(False)
-                        custom_framerate_checkbox.setEnabled(False)
                     description = preset.get("description", "")
             lower_bar.setStatusText(description)
             preset_combo.setToolTip(description)
             self.changing_preset = False
         preset_combo.currentIndexChanged.connect(preset_changed)
+        rebuild_preset_combo(preset_combo, " (autoload)")
         
         # Browse button next to preset combo
         preset_edit_button = QtGui.QPushButton("Edit...", group_box)
@@ -526,7 +568,10 @@ class SessionPresets:
                 framerate_edit.setVisible(False)
                 # If the text in framerate_edit matches a combo option, select it
                 # get float value from framerate_edit (QDoubleSpinBox)
-                index = framerate_combo.findText(str(framerate_edit.value()))
+                framerate_value = framerate_edit.value()
+                # Round to 3 decimal places, remove leading zeros and . if whole number
+                rounded_str = str(round(framerate_value, 3)).rstrip('0').rstrip('.')
+                index = framerate_combo.findText(rounded_str)
                 if index != -1:
                     framerate_combo.setCurrentIndex(index)
                 else:
@@ -655,12 +700,11 @@ class SessionPresets:
             autoload_combo.setCurrentIndex(find_autoload_index())
             # Custom preset table
             preset_table = QtGui.QTableWidget()
-            preset_table.setColumnCount(5)
-            preset_table.setHorizontalHeaderLabels(["Order", "Name", "FPS", "Path", "Description"])
+            preset_table.setColumnCount(4)
+            preset_table.setHorizontalHeaderLabels(["Order", "Name", "Path", "Description"])
             preset_table.setColumnHidden(0, True)
             # set framerate column to small and read-only
-            preset_table.setColumnWidth(2, 48)
-            preset_table.setColumnWidth(3, 128)
+            preset_table.setColumnWidth(2, 128)
             preset_table.horizontalHeader().setStretchLastSection(True)
             preset_table.sortItems(0, QtCore.Qt.AscendingOrder)
             preset_table.setEditTriggers(QtGui.QAbstractItemView.DoubleClicked | QtGui.QAbstractItemView.SelectedClicked)
@@ -670,13 +714,11 @@ class SessionPresets:
                 order_item = QtGui.QTableWidgetItem(str(preset.get("order", row)))
                 name_item = QtGui.QTableWidgetItem(preset.get("name", ""))
                 description_item = QtGui.QTableWidgetItem(preset.get("description", ""))
-                framerate_item = QtGui.QTableWidgetItem(preset.get("framerate", ""))
                 path_item = QtGui.QTableWidgetItem(preset.get("path", ""))
                 preset_table.setItem(row, 0, order_item)
                 preset_table.setItem(row, 1, name_item)
-                preset_table.setItem(row, 2, framerate_item)
-                preset_table.setItem(row, 3, path_item)
-                preset_table.setItem(row, 4, description_item)
+                preset_table.setItem(row, 2, path_item)
+                preset_table.setItem(row, 3, description_item)
             preset_editor_content_layout.addWidget(preset_table)
             # Add, Move Up, Move Down, Delete buttons
             preset_button_bar = QtGui.QWidget()
@@ -711,19 +753,14 @@ class SessionPresets:
                             _session_presets_error_msg("The selected file does not exist:\n%s" % file_path)
                             return
                         # Try to get framerate from dmx file
-                        framerate_value = ""
                         session_name = ""
-                        defaultFps = "24"
                         dmx_converted_path = self.load_dmx_file(file_path)
                         if dmx_converted_path:
                             session_data = self.get_session_from_dmx(dmx_converted_path)
                             if session_data:
-                                framerate_value = session_data["fps"]
                                 session_name = session_data["name"]
                             # Delete temporary converted file
                             os.remove(dmx_converted_path)
-                        if framerate_value == "":
-                            framerate_value = defaultFps
                         if session_name == "":
                             # Convert file name to session name by removing extension, replacing underscores or dashes with spaces, and capitalizing words
                             base_name = os.path.basename(file_path)
@@ -735,13 +772,11 @@ class SessionPresets:
                         order_item = QtGui.QTableWidgetItem(str(row))
                         name_item = QtGui.QTableWidgetItem(session_name)
                         description_item = QtGui.QTableWidgetItem("")
-                        framerate_item = QtGui.QTableWidgetItem(framerate_value)
                         path_item = QtGui.QTableWidgetItem(file_path)
                         preset_table.setItem(row, 0, order_item)
                         preset_table.setItem(row, 1, name_item)
-                        preset_table.setItem(row, 2, framerate_item)
-                        preset_table.setItem(row, 3, path_item)
-                        preset_table.setItem(row, 4, description_item)
+                        preset_table.setItem(row, 2, path_item)
+                        preset_table.setItem(row, 3, description_item)
                         rebuild_preset_combo(preset_combo, append="")
                         find_autoload_index()
             def move_up_preset():
@@ -795,14 +830,12 @@ class SessionPresets:
                 for row in range(preset_table.rowCount()):
                     order_item = preset_table.item(row, 0)
                     name_item = preset_table.item(row, 1)
-                    framerate_item = preset_table.item(row, 2)
-                    path_item = preset_table.item(row, 3)
-                    description_item = preset_table.item(row, 4)
+                    path_item = preset_table.item(row, 2)
+                    description_item = preset_table.item(row, 3)
                     preset = {
                         "order": int(order_item.text()) if order_item else row,
                         "name": name_item.text() if name_item else "",
                         "description": description_item.text() if description_item else "",
-                        "framerate": framerate_item.text() if framerate_item else "",
                         "path": path_item.text() if path_item else ""
                     }
                     self.presets.append(preset)
@@ -842,22 +875,22 @@ class SessionPresets:
 
         # Connect create button
         def accepted():
-            filename = os.path.join(dir_edit.text(), name_edit.text() + ".dmx")
+            filename = name_edit.text()
             preset_index = preset_combo.currentIndex()
-            preset_name = preset_combo.currentText()
+            directory = dir_edit.text()
+            framerate = 24.0
             
             if custom_framerate_checkbox.isChecked():
-                framerate = str(framerate_edit.value())
+                framerate = float(framerate_edit.value())
             else:
-                framerate = framerate_combo.currentText()
+                framerate = float(framerate_combo.currentText())
             
             # Save values to registry
             self.set_registry_value("Directory", dir_edit.text())
             self.set_registry_value("Name", name_edit.text())
-            self.set_registry_value("Framerate", framerate)
+            self.set_registry_value("Framerate", str(framerate))
             self.set_registry_value("UseCustomFramerate", "1" if custom_framerate_checkbox.isChecked() else "0")
-            
-            self.create_session(filename, preset_index, preset_name, framerate)
+            self.create_session(preset_index, framerate, filename, directory)
         dialog.accepted.connect(accepted)
 
         preset_changed(preset_combo.currentIndex())
@@ -893,41 +926,6 @@ class SessionPresets:
                 winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, value)
         except Exception as e:
             _session_presets_msg("Error writing registry value %s: %s" % (value_name, e))
-    
-    def create_session(self, filename, preset_index, preset_name, framerate):
-        """Create a new SFM session with the specified parameters"""
-        try:
-            _session_presets_msg("Creating session: %s with preset '%s' (index %d) at %s fps" % 
-                              (filename, preset_name, preset_index, framerate))
-            
-            # Determine if this is a default or custom preset
-            if preset_index < len(self.default_presets):
-                # Default preset
-                default_preset = self.default_presets[preset_index]
-                _session_presets_msg("Using default preset: %s" % default_preset["name"])
-                # TODO: Implement default preset creation logic
-            else:
-                # Custom preset
-                default_count = len(self.default_presets)
-                separator_offset = 1 if len(self.presets) > 0 else 0
-                custom_index = preset_index - default_count - separator_offset
-                
-                if 0 <= custom_index < len(self.presets):
-                    custom_preset = self.presets[custom_index]
-                    preset_path = custom_preset.get("path", "")
-                    _session_presets_msg("Using custom preset: %s from %s" % (custom_preset["name"], preset_path))
-                    # TODO: Load and apply custom preset from DMX file
-                else:
-                    _session_presets_msg("Error: Invalid custom preset index %d" % custom_index)
-                    return
-            
-            # TODO: Implement actual session creation logic here
-            # This would involve creating the DMX file and loading it into SFM
-            
-        except Exception as e:
-            _session_presets_msg("Error creating session: %s" % e)
-            import traceback
-            traceback.print_exc()
 
 def _SessionPresets_FirstBoot():
     try:
