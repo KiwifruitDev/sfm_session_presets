@@ -34,7 +34,7 @@ write_process_memory = ctypes.windll.kernel32.WriteProcessMemory
 get_current_process = ctypes.windll.kernel32.GetCurrentProcess
 get_command_line = ctypes.windll.kernel32.GetCommandLineA
 
-_session_presets_version = "0.1"
+_session_presets_version = "0.2"
 
 def _session_presets_msg(msg):
     sfm.Msg("[SESSION PRESETS] " + msg + "\n")
@@ -1239,12 +1239,27 @@ class SessionPresets:
         reg_directory = self.get_registry_value("Directory")
         if reg_directory is not None:
             dir_edit.setText(reg_directory)
+                
+        reg_use_custom = self.get_registry_value("UseCustomFramerate")
+        if reg_use_custom == "1":
+            custom_framerate_checkbox.setChecked(True)
+            self.custom_framerate_checkbox_state = True
+        
         reg_framerate = self.get_registry_value("Framerate")
         if reg_framerate is not None:
-            index = framerate_combo.findText(reg_framerate)
-            if index != -1:
+            framerate_value = float(reg_framerate)
+            framerate_edit.setValue(framerate_value)
+            framerate_parsed = str(round(framerate_value, 3)).rstrip('0').rstrip('.')
+            index = framerate_combo.findText(framerate_parsed)
+            if index == -1:
+                # Force showing custom framerate
+                custom_framerate_checkbox.setChecked(True)
+                framerate_edit.setVisible(True)
+                framerate_combo.setVisible(False)
+            else:
                 framerate_combo.setCurrentIndex(index)
                 default_framerate_index = index
+        
         reg_name = self.get_registry_value("Name")
         if reg_name is not None:
             base_name = reg_name
@@ -1264,11 +1279,6 @@ class SessionPresets:
                     # Append 1 to the name
                     base_name = base_name + "1"
             name_edit.setText(base_name)
-                
-        reg_use_custom = self.get_registry_value("UseCustomFramerate")
-        if reg_use_custom == "1":
-            custom_framerate_checkbox.setChecked(True)
-            self.custom_framerate_checkbox_state = True
         
         # Startup wizard options
         if startupWizard:
