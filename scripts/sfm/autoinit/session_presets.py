@@ -23,19 +23,12 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import ctypes
-import shutil
-import subprocess
-import os
-import sfm
-import sfmApp
-import json
-import traceback
-import threading
+import ctypes, shutil, subprocess, os, json, traceback
+import sfm, sfmApp
 import _winreg as winreg
-from time import sleep
 from vs import g_pDataModel as dm
-from PySide import QtGui, QtCore, shiboken
+from PySide import QtGui, QtCore
+
 virtual_protect = ctypes.windll.kernel32.VirtualProtect
 write_process_memory = ctypes.windll.kernel32.WriteProcessMemory
 get_current_process = ctypes.windll.kernel32.GetCurrentProcess
@@ -54,14 +47,8 @@ def _session_presets_msg_box(msg, prefix, icon):
     msgBox.setIcon(icon)
     msgBox.exec_()
 
-def _session_presets_info_msg(msg):
-    _session_presets_msg_box(msg, "Info", QtGui.QMessageBox.Information)
-
 def _session_presets_error_msg(msg):
     _session_presets_msg_box(msg, "Error", QtGui.QMessageBox.Critical)
-
-def _session_presets_warning_msg(msg):
-    _session_presets_msg_box(msg, "Warning", QtGui.QMessageBox.Warning)
 
 class PyCQEditorLowerBarWidget(QtGui.QWidget):
     # python implementation of CQEditorLowerBarWidget
@@ -126,7 +113,7 @@ class PyCQEditorLowerBarWidget(QtGui.QWidget):
             painter.fillRect(rect, QtGui.QColor(64, 64, 64))
 
 class SessionPresets:
-    def __init__(self):
+    def __init__(self, already_initialized=False):
         _session_presets_msg("Initializing Session Presets Script v%s" % _session_presets_version)
         self.cwd = os.getcwd()
         self.descriptor = "SFM Session Presets v%s by KiwifruitDev" % _session_presets_version
@@ -164,7 +151,12 @@ class SessionPresets:
         self.dmxConvert = self.cwd + r"\bin\dmxconvert.exe"
         self.presets = []
         self.added_separator_header = False
-        self.disable_start_wizard_patch()
+
+        # Manipulate the function in memory that shows the startup wizard to prevent it from appearing
+        if not already_initialized:
+            self.disable_start_wizard_patch()
+        
+        # Load the options from file or set defaults if they are corrupt
         self.load_options()
         if len(self.default_presets) == 0 or type(self.default_presets[0]) is not dict or self.default_presets[0].get("name", "") == "":
             # Reset to default default settings
@@ -176,10 +168,16 @@ class SessionPresets:
             self.default_session_framerate = 24.0
             self.default_session_title = "Default Startup Sessions"
             self.save_options()
+
+        # Replace New in the File menu with our own handler
         self.add_window_actions()
-        if not self.autoload_enabled and self.should_show_start_wizard():
+
+        # Show the startup wizard if needed
+        if already_initialized or not self.autoload_enabled and self.should_show_start_wizard():
             self.new_session_menu(True)
         elif self.autoload_enabled:
+            # Autoload the selected preset without showing the wizard
+            # If this script is being run twice, don't autoload again
             reg_directory = self.get_registry_value("Directory")
             reg_filename = self.get_registry_value("Name")
             reg_framerate = self.get_registry_value("FrameRate")
@@ -215,17 +213,23 @@ class SessionPresets:
                         reg_filename = reg_filename + "1"
                 self.create_session(preset_index, framerate, reg_filename, reg_directory)
     def should_show_start_wizard(self):
+        # Check if we should show the startup wizard
         if self.autoload_enabled:
             return False
+
         # Get command line for SFM process
         cmd_line_ptr = get_command_line()
         cmd_line = ctypes.c_char_p(cmd_line_ptr).value.decode('utf-8')
-        if "-nosessionwizard" in cmd_line.lower():
-            _session_presets_msg("Skipping startup wizard due to -nosessionwizard command line argument.")
+
+        # Check for -nostartwizard argument
+        if "-nostartwizard" in cmd_line.lower():
+            _session_presets_msg("Skipping startup wizard due to -nostartwizard command line argument.")
             return False
+
         return True
     def convert_dmx_file(self, path, out):
-        # run dmxconvert to load a dmx file
+        # Run dmxconvert to convert a dmx file to keyvalues2 format in order to read and modify it
+
         # Convert paths to proper OS format
         dmxconvert = os.path.normpath(self.dmxConvert)
         if not os.path.isfile(dmxconvert):
@@ -236,9 +240,12 @@ class SessionPresets:
             _session_presets_error_msg("dmxconvert input file does not exist: %s" % path)
             return None
         out = os.path.normpath(out)
-        # Delete out if it currently exists
+
+        # Delete the output file if it currently exists
+        # We should've already prompted the user to save any unsaved changes before calling this function
         if os.path.isfile(out):
             os.remove(out)
+        
         # Run dmxconvert using system call
         args = [dmxconvert, "-i", path, "-o", out, "-oe", "keyvalues2"]
         proc = subprocess.Popen(args, shell=True)
@@ -246,21 +253,29 @@ class SessionPresets:
         if return_code != 0:
             _session_presets_error_msg("dmxconvert failed to convert file %s. Return code: %d" % (path, return_code))
             return None
+
         # Check if out was created
         if os.path.isfile(out):
             return out
         return None
     def replace_name_and_framerate_in_dmx(self, dmx_path, original_filename, filename, original_framerate, framerate, is_default):
-        # Read the dmx file and modify the dmElement "sessionSettings" to set the framerate
+        # Read the dmx file line-by-line and replace the session name and framerate
+        # Also handles default session special cases, since the default session is formatted in a specific way
         search_filename = '"name" "string" "' + original_filename + '"'
         original_framerate_str = str(original_framerate).rstrip('0').rstrip('.')
         search_framerate = '"frameRate" "float" "' + original_framerate_str + '"'
         framerate_str = str(framerate).rstrip('0').rstrip('.')
         original_id = self.default_presets[0].get("id", "")
         search_id = '"activeClip" "element" "' + original_id + '"'
+
+        # "clipBin" "element_array" [] is how the clipBin is defined in default sessions
+        # This is not how SFM usually defines the clipBin, but it is formatted this way by hand in the default sessions dmx file
+        # Simply makes it easier to parse and modify here
         search_clipbin = '"clipBin" "element_array" []'
         id = ""
         description = ""
+
+        # Find the ID and description for the original filename if it's a default preset
         if is_default:
             for default_preset in self.default_presets:
                 if default_preset.get("name", "") == original_filename:
@@ -272,10 +287,13 @@ class SessionPresets:
                 lines = f.readlines()
             with open(dmx_path, "w") as f:
                 for line in lines:
+                    # Replace session name and framerate
                     if search_filename in line:
                         line = line.replace(original_filename, filename)
                     elif search_framerate in line:
                         line = line.replace(original_framerate_str, framerate_str)
+                    
+                    # Handle default session special cases
                     elif is_default and self.default_session_title in line:
                         line = line.replace(self.default_session_title, "session")
                     elif is_default and search_id in line:
@@ -284,17 +302,22 @@ class SessionPresets:
                         line = line.replace(description, "")
                     elif is_default and search_clipbin in line:
                         line = line.replace(" []", "\n\t[\n\t\t\"element\" \"" + id + "\"\n\t]")
+                    
                     f.write(line)
             return True
         except Exception as e:
             _session_presets_msg("Error modifying dmx file %s: %s" % (dmx_path, e))
         return False
     def get_framerate_from_dmx(self, dmx_path):
+        # Read the dmx file line-by-line to find the framerate
         try:
             with open(dmx_path, "r") as f:
                 lines = f.readlines()
                 for line in lines:
                     line = line.strip()
+
+                    # This line indicates any element with the framerate attribute
+                    # Includes both clips and lights, but usually they are all set to the same framerate
                     if '"frameRate" "float" "' in line:
                         # Extract framerate
                         parts = line.split('"')
@@ -302,7 +325,10 @@ class SessionPresets:
                             if parts[i] == "float" and i + 2 < len(parts):
                                 framerate_str = parts[i + 2].strip()
                                 try:
+                                    # Make sure we found a valid float
                                     framerate = float(framerate_str)
+
+                                    # Return the first valid framerate found
                                     return framerate
                                 except ValueError:
                                     _session_presets_msg("Invalid framerate value in dmx file %s: %s" % (dmx_path, framerate_str))
@@ -310,6 +336,7 @@ class SessionPresets:
             _session_presets_msg("Error reading dmx file %s: %s" % (dmx_path, e))
         return None
     def get_name_from_dmx(self, dmx_path):
+        # Read the dmx file line-by-line to find the active clip name
         try:
             with open(dmx_path, "r") as f:
                 lines = f.readlines()
@@ -318,12 +345,16 @@ class SessionPresets:
                 clip_name = None
                 for line in lines:
                     line = line.strip()
+
+                    # This line indicates the start of the active clip attribute in the root document
                     if not clip_name and not clip_id and '"activeClip" "element" "' in line:
                         # Get the clip ID
                         parts = line.split('"')
                         for i in range(len(parts)):
                             if parts[i] == "element" and i + 2 < len(parts):
                                 clip_id = parts[i + 2].strip()
+                    
+                    # Look for the active clip by its ID
                     elif not clip_name and clip_id and '"id" "elementid" "' + clip_id + '"' in line:
                         in_active_clip = True
                     elif not clip_name and in_active_clip:
@@ -332,12 +363,14 @@ class SessionPresets:
                             in_active_clip = False
                             clip_id = None
                         elif '"name" "string" "' in line:
-                            # Extract clip name
+                            # Extract clip name from this line
                             parts = line.split('"')
                             for i in range(len(parts)):
                                 if parts[i] == "string" and i + 2 < len(parts):
                                     clip_name = parts[i + 2].strip()
                                     in_active_clip = False
+                    
+                    # If we have found the clip name, return it
                     if clip_name:
                         return clip_name
         except Exception as e:
@@ -346,62 +379,56 @@ class SessionPresets:
     def disable_start_wizard_patch(self):
         # Apply a patch to prevent the startup wizard from appearing
         _session_presets_msg("Applying patches to stop startup wizard...")
+
+        # This is just about where code stops executing when Python is loaded
         addr = ctypes.windll.ifm._handle + 0x2d1685 # game/bin/tools/ifm.dll -> 6a 28 PUSH 0x28, e8 f4 d3 f8 ff CALL FUN_1025ea80
+
+        # We're jumping straight to the end of the function that sets up and shows the startup wizard
+        # This is the same behavior as using the -nostartwizard command line argument
         data = [0x66, 0x90, 0xE9, 0x92, 0xF4, 0xFF, 0xFF] # 66 90 NOP, e9 92 f4 ff ff JMP LAB_102d0b1e
         data_len = len(data)
         data_bytes = (ctypes.c_char * data_len).from_buffer(bytearray(data))
-        bytes_written = ctypes.c_size_t(0)
-        # Disable write protection, write the patch, restore protection
+        
+        # Disable write protection
         old_protect = ctypes.c_ulong()
         virtual_protect(addr, data_len, 0x40, ctypes.byref(old_protect))
+
+        # Write the patch
+        bytes_written = ctypes.c_size_t(0)
         write_process_memory(get_current_process(), addr, ctypes.addressof(data_bytes), ctypes.sizeof(data_bytes), ctypes.byref(bytes_written))
+
+        # Restore write protection, and we're done!
         virtual_protect(addr, data_len, old_protect, ctypes.byref(old_protect))
         _session_presets_msg("Patches applied to address 0x%X" % addr)
     def load_options(self):
         # JSON file format
-        """
-        {
-            "default_session_framerate": 24.0,
-            "default_session_title": "Default Startup Sessions",
-            "options": {
-                "autoload_preset": "Stage",
-                "autoload_enabled": true,
-                "autoload_preset_is_default": true,
-            },
-            "default_presets": [
-                {
-                    "name": "Blank",
-                    "description": "An empty session without a map or camera. This is what SFM uses by default."
-                },
-            ],
-            "presets": [
-                {
-                    "name": "Custom Preset 1",
-                    "order": 1,
-                    "description": "A custom preset",
-                    "path": "C:\\path\\to\\custom\\preset1.dmx"
-                }
-            ],
-            "version": "0.0"
-        }
-        
-        """
         options_path = os.path.join(self.cwd, self.options_file)
+
+        # Create options file with default values if it does not exist
         if not os.path.isfile(options_path):
-            self.save_options() # create default options file
+            self.save_options()
+            return # We already have default values set in __init__
+        
+        # Load options from file
         if os.path.isfile(options_path):
             try:
                 with open(options_path, "r") as f:
                     data = json.load(f)
                 options = data.get("options", {})
+
+                # User-settable options
                 self.autoload_preset = options.get("autoload_preset", "")
                 self.autoload_enabled = options.get("autoload_enabled", False)
                 self.autoload_preset_is_default = options.get("autoload_preset_is_default", False)
+
+                # Populate default presets and settings
                 self.default_session_framerate = data.get("default_session_framerate", 24.0)
                 self.default_session_title = data.get("default_session_title", "Default Startup Sessions")
                 default_presets = data.get("default_presets", [])
                 if default_presets:
                     self.default_presets = default_presets
+
+                # Populate custom presets
                 presets = data.get("presets", [])
                 for preset in presets:
                     append_preset = {
@@ -415,6 +442,9 @@ class SessionPresets:
             except Exception as e:
                 _session_presets_msg("Error loading options from %s: %s" % (options_path, e))
     def save_options(self):
+        # JSON file format
+        # Saves the current options to the options file
+        # This also populates default values if they do not exist in the current options file
         options_path = os.path.join(self.cwd, self.options_file)
         data = {
             "options": {
@@ -435,23 +465,33 @@ class SessionPresets:
         except Exception as e:
             _session_presets_msg("Error saving options to %s: %s" % (options_path, e))
     def add_window_actions(self):
-        # Adds a window action to File menu, taken from https://steamcommunity.com/sharedfiles/filedetails/?id=562830725
+        # Adds a window action to File menu, taken from SFM Python Module Pack
+        # https://steamcommunity.com/sharedfiles/filedetails/?id=562830725
+        # Credit to walropodes for the original code
+
+        # Look for the File menu in the main window's menu bar
         main_window = sfmApp.GetMainWindow()
         for widget in main_window.children():
             if isinstance(widget, QtGui.QMenuBar):
                 menu_bar = widget
                 break
+            
+        # Find the File menu
         for menu_item in menu_bar.actions():
             if menu_item.text() == 'File':
                 file_menu = menu_item.menu()
                 break
-        # Replace New button action with our own
+        
+        # The first action is the New button action
+        # We're going to disconnect its event and connect our own
         new_action = file_menu.actions()[0]
         new_action.setShortcut(QtGui.QKeySequence("Ctrl+N"))
         try:
-            new_action.triggered.disconnect()
+            new_action.triggered.disconnect() # SFM's original new session handler
         except Exception as e:
             pass
+
+        # Connect our new session menu to the New action
         new_action.triggered.connect(self.new_session_menu)
     def create_session(self, preset_index, framerate, filename, directory):
         if sfmApp.HasDocument():
@@ -478,22 +518,64 @@ class SessionPresets:
         try:
             if default_preset:
                 dmx_path = os.path.join(self.cwd, "workshop\\scripts\\default_startup_sessions.dmx")
+                
                 if not os.path.isfile(dmx_path):
-                    raise Exception("Default startup sessions file not found: %s" % dmx_path)
+                    # Possibly cloned git repository as a mod
+                    dmx_path = os.path.join(self.cwd, "sfm_session_presets\\scripts\\default_startup_sessions.dmx")
+                if not os.path.isfile(dmx_path):
+                    # Search each directory in cwd except known game directories
+                    dmx_path = ""
+                    ignore_dirs = [
+                        "bin",
+                        "hl2",
+                        "left4dead2_movies",
+                        "platform",
+                        "sdktools",
+                        "tf",
+                        "tf_movies",
+                        "workshop",
+                        "dod",
+                        "portal2",
+                        "portal2_dlc1",
+                        "portal2_dlc2",
+                        "bladesymphony",
+                        "blackmesa",
+                        "left4dead2",
+                        "left4dead2_dlc1",
+                        "left4dead2_dlc2",
+                        "dinodday",
+                        "stanleyparable"
+                    ]
+                    for item in os.listdir(self.cwd):
+                        item_path = os.path.join(self.cwd, item)
+                        if os.path.isdir(item_path) and item.lower() not in ignore_dirs:
+                            scripts_path = os.path.join(item_path, "scripts", "default_startup_sessions.dmx")
+                            if os.path.isfile(scripts_path):
+                                dmx_path = scripts_path
+                                break
+                    if not os.path.isfile(dmx_path):
+                        raise Exception("Found a default startup sessions but could not read it: %s" % dmx_path)
+                if not os.path.isfile(dmx_path):
+                    raise Exception("Could not search and find default startup sessions file.")
                 _session_presets_msg("Loading default startup sessions from %s" % dmx_path)
+
                 # copy the default startup sessions to the new location
                 shutil.copyfile(dmx_path, full_filename)
                 if not os.path.isfile(full_filename):
                     raise Exception("Failed to copy default startup sessions file to: %s" % full_filename)
                 if not self.replace_name_and_framerate_in_dmx(full_filename, preset_path, filename, self.default_session_framerate, framerate, True):
                     raise Exception("Failed to modify copied default startup sessions file: %s" % dmx_path)
+                
+                # Load the copied default startup sessions file
                 sfmApp.OpenDocument(full_filename)
                 sfmApp.ProcessEvents()
                 os.remove(full_filename)
-                # Document loaded! First we'll update self.default_presets
                 document = sfmApp.GetDocumentRoot()
                 if not document:
                     raise Exception("Failed to open copied default startup sessions document.")
+                
+                # Since we're reading from the default sessions, let's update our local default_presets list to match any changes
+                # This allows the Workshop item to update the default presets without updating this script as well
                 defaults = getattr(document, "defaults", None)
                 ids = getattr(document, "ids", None)
                 if not defaults or not ids:
@@ -502,7 +584,7 @@ class SessionPresets:
                 defaults_array = defaults.GetValue()
                 ids_array = ids.GetValue()
                 count = defaults_array.Count()
-                activeclip = None
+                activeclip = None # We're also looking for the desired default session here
                 for i in range(count):
                     try:
                         clip_element = defaults_array[i]
@@ -510,6 +592,7 @@ class SessionPresets:
                         id = ids_array[i]
                         description = clip_element.text.GetValue()
                         if name == filename:
+                            # Found the active clip, keep our current preset info as it was previously changed when copying
                             clips.append({
                                 "name": self.default_presets[preset_index].get("name", ""),
                                 "description": self.default_presets[preset_index].get("description", ""),
@@ -517,6 +600,7 @@ class SessionPresets:
                             })
                             activeclip = clip_element
                         else:
+                            # Populate this clip info into our default presets
                             clips.append({
                                 "name": name,
                                 "description": description,
@@ -526,42 +610,68 @@ class SessionPresets:
                         raise Exception("Error reading clip from defaults: %s" % e)
                 if not activeclip:
                     raise Exception("Failed to find active clip in copied default startup sessions document.")
+
+                # Update our default_presets list
                 self.default_presets = clips
-                dm.SetUndoEnabled(False)
+
+                # Set this session's active clip to the one we just created
+                dm.SetUndoEnabled(False) # Making element changes...
                 document.activeClip = activeclip
-                document.clipBin.SetCount(1)
+
+                # We can't add it to the clipBin without crashing SFM, instead we've done this in the dmx file modification
+                #document.clipBin.SetCount(1)
                 #document.clipBin[0] = activeclip
+
+                # Remove defaults and ids attributes to clean up what's left of the default sessions
                 document.RemoveAttribute("defaults")
                 document.RemoveAttribute("ids")
-                dm.SetUndoEnabled(True)
+
+                # Finished! Save what we've done and return
+                dm.SetUndoEnabled(True) # Done making element changes
                 self.save_options()
                 return True
             elif preset_path:
-                # Find preset in self.presets
+                # User selected a custom preset, let's find it
                 if not preset_path or not os.path.isfile(preset_path):
                     raise Exception("Preset file not found: %s" % preset_path)
+                
+                # Convert the preset dmx file to keyvalues2 format so we can read it line-by-line
                 dmx_converted_path = self.convert_dmx_file(preset_path, full_filename)
                 if not dmx_converted_path:
                     raise Exception("Failed to convert preset dmx file: %s" % preset_path)
+                
+                # Read the converted dmx file to get the session name and framerate
                 session_name = self.get_name_from_dmx(dmx_converted_path)
                 if session_name:
                     session_name = session_name
                 framerate_in_dmx = self.get_framerate_from_dmx(dmx_converted_path)
                 if not framerate_in_dmx:
                     framerate_in_dmx = self.default_session_framerate
+
+                # Set the desired name and framerate in the copied dmx file
                 if not self.replace_name_and_framerate_in_dmx(dmx_converted_path, session_name, filename, framerate_in_dmx, framerate, False):
                     raise Exception("Failed to modify copied preset dmx file: %s" % dmx_converted_path)
+                
+                # Just in case, close any open document forcefully (we already asked the user to save unsaved changes above)
                 if sfmApp.HasDocument():
                     sfmApp.CloseDocument()
+
+                # Open the modified preset dmx file as the new session
+                # This also causes the map to load if there is one set
                 sfmApp.OpenDocument(dmx_converted_path)
                 sfmApp.ProcessEvents()
+
+                # Delete this new session file
+                # If the user makes any changes, SFM will ask them to save it before closing
+                # This keeps behavior consistent with regular new session creation
                 os.remove(dmx_converted_path)
                 return True
         except Exception as e:
             _session_presets_msg("Error creating session from preset: %s" % e)
             traceback.print_exc()
+        # Looks like we fell through - create a blank session as fallback
         if sfmApp.HasDocument():
-            sfmApp.CloseDocument()
+            sfmApp.CloseDocument() # In case we have a lingering document still open
         sfmApp.NewDocument(filename=full_filename, name=filename, framerate=framerate, defaultContent=True, forceSilent=False)
         return True
     def new_session_menu(self, startupWizard=False):
@@ -913,7 +1023,8 @@ class SessionPresets:
             preset_table.setColumnCount(4)
             preset_table.setHorizontalHeaderLabels(["Order", "Name", "Path", "Description"])
             preset_table.setColumnHidden(0, True)
-            preset_table.setColumnWidth(2, 128)
+            preset_table.setColumnWidth(1, 128)
+            preset_table.setColumnWidth(2, 256)
             preset_table.horizontalHeader().setStretchLastSection(True)
             preset_table.sortItems(0, QtCore.Qt.AscendingOrder)
             preset_table.setEditTriggers(QtGui.QAbstractItemView.DoubleClicked | QtGui.QAbstractItemView.SelectedClicked)
@@ -972,7 +1083,7 @@ class SessionPresets:
             def edit_path_item(item):
                 if item.column() == 2:
                     row = item.row()
-                    file_dialog = QtGui.QFileDialog(preset_editor, "Select Preset DMX File", "", "SFM Session (*.dmx)")
+                    file_dialog = QtGui.QFileDialog(preset_editor, "Select Preset Session", "", "SFM Session (*.dmx)")
                     file_dialog.setFileMode(QtGui.QFileDialog.ExistingFile)
                     # Default to the directory in dir_edit
                     start_dir = dir_edit.text().strip()
@@ -1016,7 +1127,7 @@ class SessionPresets:
             preset_table.itemChanged.connect(item_changed)
             def add_preset():
                 # File picker dialog to select a .dmx file
-                file_dialog = QtGui.QFileDialog(preset_editor, "Select Preset DMX File", "", "SFM Session (*.dmx)")
+                file_dialog = QtGui.QFileDialog(preset_editor, "Select Preset Session", "", "SFM Session (*.dmx)")
                 file_dialog.setFileMode(QtGui.QFileDialog.ExistingFile)
                 # Default to the directory in dir_edit
                 start_dir = dir_edit.text().strip()
@@ -1355,19 +1466,16 @@ class SessionPresets:
 def _SessionPresets_FirstBoot():
     try:
         # Create window if it doesn't exist
+        already_initialized = False
         sessionpresets = globals().get("_session_presets")
         if sessionpresets is not None:
+            already_initialized = True
             # Delete existing instance
             del globals()["_session_presets"]
-        sessionpresets = SessionPresets()
+        sessionpresets = SessionPresets(already_initialized=already_initialized)
         globals()["_session_presets"] = sessionpresets
     except Exception  as e:
         traceback.print_exc()
         _session_presets_error_msg("Error: %s" % e)
-
-# Attached default startup session in binary, saved to usermod\elements\default_startup_sessions.dmx on first run
-startup_session = """
-###
-"""
 
 _SessionPresets_FirstBoot()
