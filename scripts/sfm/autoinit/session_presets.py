@@ -34,7 +34,7 @@ write_process_memory = ctypes.windll.kernel32.WriteProcessMemory
 get_current_process = ctypes.windll.kernel32.GetCurrentProcess
 get_command_line = ctypes.windll.kernel32.GetCommandLineA
 
-_session_presets_version = "0.3"
+_session_presets_version = "1.0"
 
 def _session_presets_msg(msg):
     sfm.Msg("[SESSION PRESETS] " + msg + "\n")
@@ -172,12 +172,18 @@ class SessionPresets:
         # Replace New in the File menu with our own handler
         self.add_window_actions()
 
+        # Check to make sure we haven't already loaded a document (autosave recovery)
+        if sfmApp.HasDocument():
+            _session_presets_msg("Document already open, skipping new session wizard or autoload.")
+            return
+
         # Show the startup wizard if needed
         if already_initialized or not self.autoload_enabled and self.should_show_start_wizard():
             self.new_session_menu(True)
         elif self.autoload_enabled:
             # Autoload the selected preset without showing the wizard
             # If this script is being run twice, don't autoload again
+            
             reg_directory = self.get_registry_value("Directory")
             reg_filename = self.get_registry_value("Name")
             reg_framerate = self.get_registry_value("FrameRate")
@@ -503,8 +509,9 @@ class SessionPresets:
         full_filename = directory + "/" + filename + ".dmx"
         default_preset = False
         preset_path = ""
+        print(preset_index)
         # Determine if preset_index is a default preset or custom preset
-        if preset_index > 0:
+        if preset_index >= 0:
             if preset_index < len(self.default_presets):
                 default_preset = True
                 preset_path = self.default_presets[preset_index].get("name", "")
@@ -672,7 +679,8 @@ class SessionPresets:
         # Looks like we fell through - create a blank session as fallback
         if sfmApp.HasDocument():
             sfmApp.CloseDocument() # In case we have a lingering document still open
-        sfmApp.NewDocument(filename=full_filename, name=filename, framerate=framerate, defaultContent=True, forceSilent=False)
+        sfmApp.ProcessEvents()
+        sfmApp.NewDocument(full_filename, filename, framerate=framerate)
         return True
     def new_session_menu(self, startupWizard=False):
         self.custom_framerate_checkbox_state = False

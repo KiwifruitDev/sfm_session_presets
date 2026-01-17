@@ -1,14 +1,53 @@
-[h1]SFM Session Presets Script[/h1]
-
+[h1]Session Presets: For a Faster Workflow![/h1]
+Pick from a list of presets to apply to new sessions and pick a preset to load when SFM starts.
+Also adds the ability to set a custom framerate for new sessions.
 Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3400621327]Autoinit Manager[/url] to work.
+View the changelog [url=https://steamcommunity.com/workshop/filedetails/discussion/]here[/url].
+
 [h2]Usage[/h2]
 Perform the following steps to use this script:
 [list]
-[*]Install [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3400621327]Autoinit Manager[/url] and this script.
+[*]Install [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3400621327]Autoinit Manager[/url] and this script from the Steam Workshop.
 [*]Once SFM has updated the Workshop items, restart SFM.
+[*]You should see the startup wizard appear when SFM starts, now with new options. You can use File -> New to open the new session menu at any time.
+[*]You can create and manage presets by clicking "Edit..." in the startup wizard.
 [/list]
+
+[h2]Autoload Preset[/h2]
+To set a preset to autoload when SFM starts:
+[list]
+[*]Open the startup wizard when SFM starts or click File -> New to open the new session menu.
+[*]Click "Edit..." to open the preset editor.
+[*]Select a preset in the dropdown menu at the top.
+[*]Select the "Load automatically when SFM starts" checkbox.
+[*]Click "OK" to save the changes.
+[*]Restart SFM, the selected preset should load automatically.
+[/list]
+
+[h2]Included Presets[/h2]
+The script comes with default presets for common use cases:
+[list]
+[*]Blank (automatically selected by default): An empty session without a map or camera. This is what SFM uses by default.
+[*]Stage, Camera, Light: Uses the stage map with a camera in the center and key, bounce, fill, and rim lights set up.
+[*]Dark Room: Uses the dark_room map with a camera set up in the corner.
+[/list]
+
+[h2]Custom Presets[/h2]
+You can create your own custom presets to show up in the preset list:
+[list]
+[*]Create a new session in SFM with the desired setup (map, camera, lights, etc).
+[*]Save the session as a DMX file in a known location.
+[*]Open the new session menu by clicking File -> New.
+[*]Click "Edit..." to open the preset editor.
+[*]Click "Add" and select the DMX file you saved earlier.
+[*]The preset will be added to the list, you can rename it and set a description if desired.
+[*]If you'd like this preset to be selected as default, select it in the dropdown menu at the top.
+[*]To load this preset automatically when SFM starts, select the "Load automatically when SFM starts" checkbox.
+[*]To remove a preset, select it in the list and click "Remove".
+[*]Click "OK" to save the changes.
+[/list]
+
 [h2]Development[/h2]
-If you are a developer, check out this script on [url=https://github.com/KiwifruitDev/sfm_session_presets]GitHub[/url].
-[h2]License[/h2]
-This script is licensed under the [url=https://github.com/KiwifruitDev/sfm_session_presets/blob/main/LICENSE]MIT License[/url].
-Feel free to credit me as KiwifruitDev if you use or modify this script. I'd appreciate it!
+Please consider supporting my work through [url=https://ko-fi.com/kiwifruitdev]Ko-fi[/url]! 💚
+This script is available on [url=https://github.com/KiwifruitDev/sfm_session_presets]GitHub[/url] and is licensed under the [url=https://github.com/KiwifruitDev/sfm_session_presets/blob/main/LICENSE]MIT License[/url].
+Feel free to credit me as KiwifruitDev if you use or modify this script, I'd really appreciate it!
