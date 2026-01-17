@@ -34,7 +34,7 @@ write_process_memory = ctypes.windll.kernel32.WriteProcessMemory
 get_current_process = ctypes.windll.kernel32.GetCurrentProcess
 get_command_line = ctypes.windll.kernel32.GetCommandLineA
 
-_session_presets_version = "0.2"
+_session_presets_version = "0.3"
 
 def _session_presets_msg(msg):
     sfm.Msg("[SESSION PRESETS] " + msg + "\n")
@@ -134,7 +134,7 @@ class SessionPresets:
                 "id": "91b71055-26fe-4b6f-bf6a-6afdc2a986ee"
             },
             {
-                "name": "Stage",
+                "name": "Stage, Camera, Light",
                 "description": "Uses the stage map with a camera in the center and key, bounce, fill, and rim lights set up.",
                 "id": "94b17e1f-dd81-455a-b889-0e734a6845f9"
             },
